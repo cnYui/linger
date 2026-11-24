@@ -1,0 +1,86 @@
+name: Claude Code canary
+
+# Runs the Computer Daemon's native Claude Code compatibility test against the
+# newest Claude Code on Anthropic's stable channel (or the version given to a
+# manual run). The Daemon sets only a minimum Claude version, so a user's own
+# newer Claude Code reaches it before any localmodels kit locks that release;
+# a protocol change shows up here first. It is its own workflow so a run's
+# conclusion speaks for one Runtime: the Codex canary gates the kit's Codex
+# lock updates. A failed scheduled run opens one issue, and later failures
+# comment on it.
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Claude Code version to test (default the stable channel)
+        required: false
+  pull_request:
+    paths:
+      - .github/workflows/claude-canary.yml
+
+permissions:
+  contents: read
+  issues: write
+
+# One group per tested version, so a manual run for one Claude Code never
+# cancels the run for another, or the daily run.
+concurrency:
+  group: claude-canary-${{ github.ref }}-${{ inputs.version || 'stable' }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # The probe is a Go test; it needs no Node or workspace install.
+      - uses: ./.github/actions/setup
+        with:
+          node: "false"
+          install: "false"
+      # The native linux-x64 build from Anthropic's release channel, checked
+      # against its manifest, as the localmodels kit installs it.
+      - name: Install Claude Code
+        id: claude
+        env:
+          REQUESTED: ${{ inputs.version }}
+          BASE: https://downloads.claude.ai/claude-code-releases
+        run: |
+          set -euo pipefail
+          version=${REQUESTED:-$(curl -fsSL "$BASE/stable")}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a stable Claude Code version: $version"; exit 1; }
+          dir="$RUNNER_TEMP/claude"
+          mkdir -p "$dir"
+          checksum=$(curl -fsSL "$BASE/$version/manifest.json" | jq -er '.platforms["linux-x64"].checksum')
+          curl -fsSL -o "$dir/claude" "$BASE/$version/linux-x64/claude"
+          echo "$checksum  $dir/claude" | sha256sum -c -
+          chmod +x "$dir/claude"
+          "$dir/claude" --version
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "executable=$dir/claude" >>"$GITHUB_OUTPUT"
+      # The stream-json handshake and the local authentication probe, against
+      # a loopback endpoint that must see no model request.
+      - name: Protocol and authentication probe
+        working-directory: apps/computer/local-daemon
+        env:
+          LINGER_CLAUDE_COMPAT_EXECUTABLE: ${{ steps.claude.outputs.executable }}
+        run: go test ./internal/provider -run '^TestNativeClaudeAuthenticationDoesNotCallModel$' -count=1 -v
+      - name: Report a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.claude.outputs.version }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Claude Code canary fails"
+          body="The Daemon's native Claude Code compatibility test failed on Claude Code ${VERSION:-unknown}: $RUN"
+          issue=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
