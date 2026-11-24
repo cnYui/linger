@@ -129,6 +129,8 @@ Run the cross-platform helper first (`node .agents/skills/verify-linger/scripts/
 2. **BYOK Quit → Reopen (reachable & unreachable upstream):** Switch to BYOK, Quit Desktop (Bifrost exits), then reopen with upstream reachable → confirm `restoreByokSource` remounts Bifrost without re-entering the key and a Room prompt succeeds. Repeat with upstream intentionally blocked/down → confirm Desktop still opens (`local_server.byok_gateway_unavailable` logged) and **Settings › Models** remains reachable to reconfigure.
 3. **Uninstall / Upgrade teardown (especially Windows NSIS):** Run uninstaller (or `installer.js --instance desktop --stop`). Confirm `library unload`, `foundations stop`, and `stack down` leave zero lingering model engine or Bifrost processes. Separately verify fail-closed safety on a damaged pinned kit (`LOCALMODELS_KIT_VERIFICATION_FAILED` stops uninstall with Retry/Cancel instead of silently executing or re-downloading an unverified kit).
 
+The release-to-release upgrade of a running local model and its gateway is verified in [Upgrade from the previous release](desktop-and-installer.md#upgrade-from-the-previous-release).
+
 ## Model scheduling and background Pi Memory/Wiki
 
 Read [Model Scheduling](../../../../docs/model-scheduling.md) and [Local Inference](../../../../docs/local-inference.md#background-memory-and-wiki).

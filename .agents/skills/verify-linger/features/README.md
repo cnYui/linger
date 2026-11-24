@@ -21,6 +21,7 @@ Recipes are definitions, not execution results or claims about an uncommitted re
 | Install and pair on Windows                  | [Windows](local-computer.md#windows-install-pairing-and-background-run)  | Windows Go tests and `check-local-computer-windows.ps1`                                                                     | Elevated refusal, pairing, run after terminal close, state after reboot                                                                      |
 | Add or change an Agent Runtime               | [New Runtime](local-computer.md#new-runtime-acceptance)                  | Runtime adapter fake-process tests; Runner smoke                                                                            | Every tool class, permissions, complex Tasks and failures against a Claude Code baseline                                                     |
 | Install, update and uninstall Desktop client | [Desktop & Installer](desktop-and-installer.md)                          | `verify-local-client.mjs`, `make check-desktop`, `make check-installer`, `make check-packages`, Windows native ACL/Pi smoke | Real `.dmg`/`.tar.gz`/`-setup.exe` install, Quick Install, updater swap, permissions, uninstall across macOS/Linux/Windows                   |
+| Upgrade Desktop from the previous release    | [Upgrade](desktop-and-installer.md#upgrade-from-the-previous-release)    | Resume and local-model restore unit tests                                                                                   | Required for every release and RC: a real previous install, each upgrade path, Quit → Reopen, cold restart                                   |
 | Deploy local models and switch to BYOK       | [Local Models & BYOK](local-models-and-byok.md)                          | `verify-local-client.mjs`, `localmodels` Go tests, `byok-endpoint` & Settings › Models unit/integration tests               | Real `localmodels` kit download, GPU/Metal/CUDA load, drive check, BYOK endpoint execution & quit/resume teardown across macOS/Linux/Windows |
 | Let an Agent use the desktop and a browser   | [Desktop and browser tools](local-computer.md#desktop-and-browser-tools) | Opt-in `Test*Live` Daemon probes; dialog unit tests                                                                         | Model-driven task result; connect and disconnect the user's Chrome                                                                           |
 | Stop, reconnect or recover work              | [Execution lifecycle](rooms.md#execution-lifecycle)                      | Runner smoke/soak and process tests                                                                                         | Real-model interruption and visible recovery without duplicate effects                                                                       |
@@ -42,6 +43,12 @@ For a routine change, select affected journeys and their shared boundaries.
 Record disabled capabilities and missing dependencies instead of silently omitting them.
 Also exercise [personal meeting visibility](library.md#meetings-and-personal-visibility) and [Pocket Notes/Profile](wiki.md#pocket-notes-and-current-profile) when available.
 Voice and proactive behavior have additional recipes below. Supplier events require their own authorized connections; private-chat proactive review is enabled by default.
+
+## Release and release candidate regression
+
+Every Desktop release and release candidate runs the [upgrade from the previous release](desktop-and-installer.md#upgrade-from-the-previous-release) on each shipped target, in addition to the journeys its changes select.
+Users only reach a new version by upgrading, and upgrades broke releases that passed fresh-install checks.
+A release report without this journey, or with a target marked blocked, does not support publishing that release.
 
 ## Capability coverage and entry points
 
