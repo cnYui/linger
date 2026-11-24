@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/claude-canary.yml
+      - .github/actions/native-runtimes/**
 
 permissions:
   contents: read
@@ -41,38 +42,23 @@ jobs:
         with:
           node: "false"
           install: "false"
-      # The native linux-x64 build from Anthropic's release channel, checked
-      # against its manifest, as the localmodels kit installs it.
-      - name: Install Claude Code
+      - uses: ./.github/actions/native-runtimes
         id: claude
-        env:
-          REQUESTED: ${{ inputs.version }}
-          BASE: https://downloads.claude.ai/claude-code-releases
-        run: |
-          set -euo pipefail
-          version=${REQUESTED:-$(curl -fsSL "$BASE/stable")}
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a stable Claude Code version: $version"; exit 1; }
-          dir="$RUNNER_TEMP/claude"
-          mkdir -p "$dir"
-          checksum=$(curl -fsSL "$BASE/$version/manifest.json" | jq -er '.platforms["linux-x64"].checksum')
-          curl -fsSL -o "$dir/claude" "$BASE/$version/linux-x64/claude"
-          echo "$checksum  $dir/claude" | sha256sum -c -
-          chmod +x "$dir/claude"
-          "$dir/claude" --version
-          echo "version=$version" >>"$GITHUB_OUTPUT"
-          echo "executable=$dir/claude" >>"$GITHUB_OUTPUT"
-      # The stream-json handshake and the local authentication probe, against
-      # a loopback endpoint that must see no model request.
-      - name: Protocol and authentication probe
+        with:
+          claude: ${{ inputs.version || 'stable' }}
+      # The stream-json handshake and local authentication probe, which must
+      # send no model request, then a first Run with a Bash call and a resume
+      # in a new process, both against a loopback Messages API.
+      - name: Native Claude Code compatibility
         working-directory: apps/computer/local-daemon
         env:
-          LINGER_CLAUDE_COMPAT_EXECUTABLE: ${{ steps.claude.outputs.executable }}
-        run: go test ./internal/provider -run '^TestNativeClaudeAuthenticationDoesNotCallModel$' -count=1 -v
+          LINGER_CLAUDE_COMPAT_EXECUTABLE: ${{ steps.claude.outputs.claude-executable }}
+        run: go test ./internal/provider -run '^(TestNativeClaudeAuthenticationDoesNotCallModel|TestNativeClaudeFirstRunResume)$' -count=1 -v
       - name: Report a scheduled failure
         if: failure() && github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.claude.outputs.version }}
+          VERSION: ${{ steps.claude.outputs.claude-version }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
