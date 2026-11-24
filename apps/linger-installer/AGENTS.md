@@ -111,6 +111,14 @@ When the handoff fails, the job still succeeds without `runtime`, stderr gets
 one `{"event":"installer.runtime_handoff_failed","instance","message"}` line,
 and the desktop falls back to `GET /api/instances/{name}/runtime`.
 
+`GET /api/instances/{name}/runtime` runs one lookup per instance at a time
+(`runtime-lookup.ts`): a second request joins the running one, and a finished
+answer is kept for 10 minutes, so a desktop that stopped waiting picks up the
+late result on Try Again or its next launch instead of starting the lookup
+over. Starting or finishing an install, or saving a runtime key, forgets it.
+The runtime descriptors an install inspected answer the lookup in place of a
+second status probe, as on the resume path.
+
 `--stop` (with `--instance`) is the desktop uninstall's and Windows setup's: it stops the
 manager the desktop started for that instance (its `/api/stop` cancels a
 running job) and the instance's services, deletes nothing, and prints one
