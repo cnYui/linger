@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/simplexai-labs/linger/apps/computer/local-daemon/internal/provider/native"
 )
 
 // TestNativeClaudeFirstRunResume drives a real Claude Code through the
@@ -29,6 +30,9 @@ func TestNativeClaudeFirstRunResume(t *testing.T) {
 	server := httptest.NewServer(model)
 	defer server.Close()
 	root := t.TempDir()
+	// Registered after TempDir, so it runs first: a parked Claude resident
+	// still writes under root until it stops.
+	t.Cleanup(func() { _, _ = native.StopAllParkedResidents() })
 	workspace := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
