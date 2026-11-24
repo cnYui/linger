@@ -125,7 +125,14 @@ Gateway and runs Agents. The daemon exits with the app.
   Desktop config. After sign-in, when reusing a completed job, or when the installer
   omits the runtime, it reads `GET /api/instances/desktop/runtime` for the current
   environment. The job's setup choice identifies the runtime for sign-in when available.
-  Desktop also saves the runtime its `setupChoice` runs (`local-models` runs
+  On Windows that lookup can take minutes (#385, #549): the
+  desktop waits for it while the installer answers, asks again after a
+  dropped connection (the installer joins the running lookup), and gives up
+  only after `RUNTIME_LOOKUP_LIMIT_MS` (10 minutes) with the typed `failure`
+  `runtime_lookup_timed_out` or, once unreachable for the reconnect window,
+  `runtime_lookup_unreachable`; the setup page words both. After 15 seconds
+  the status carries `waiting: "runtime"` and the page says what the bar
+  waits on. Desktop also saves the runtime its `setupChoice` runs (`local-models` runs
   on Pi) as `preferredRuntime`. The daemon config carries that as
   `preferred_runtime`, and the daemon marks that runtime's diagnostic
   `preferred`, so TeamHub creates Another Me and the starter Agents on it

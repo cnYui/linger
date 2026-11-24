@@ -285,6 +285,17 @@ export interface RuntimeSignIn {
 // finished it in time; ended: the login stopped without a sign-in.
 export type RuntimeLoginReason = "unavailable" | "timed_out" | "ended";
 
+// Why an installation stopped, for failures the setup page words itself:
+// the runtime lookup outlasted RUNTIME_LOOKUP_LIMIT_MS, or the installer
+// stopped answering while it ran.
+export type LocalServerFailure =
+  | "runtime_lookup_timed_out"
+  | "runtime_lookup_unreachable";
+
+// What a running step still waits on once it has taken a while; the page
+// says so, since the bar does not move meanwhile.
+export type LocalServerWaiting = "runtime";
+
 // Codex's two logins: browser calls back to this computer, so the browser
 // must run here; device shows a code to enter in any browser, which needs
 // device-code sign-in turned on in the person's ChatGPT settings.
@@ -306,6 +317,8 @@ export interface LocalServerStatus {
   readonly progress: number;
   // While the current step downloads: what and how far.
   readonly transfer?: Transfer & { readonly label: string };
+  // While installing: what a step that has run a while still waits on.
+  readonly waiting?: LocalServerWaiting;
   // Which installation this is; each Install or Try Again starts a new one.
   readonly attempt: number;
   readonly localModels: LocalModelsCheck;
@@ -326,6 +339,8 @@ export interface LocalServerStatus {
   // While failed because the installer refused a folder as not private
   // (Windows): its code and reason.
   readonly refusal?: WindowsPrivateRefusal;
+  // While failed for a reason the page words itself.
+  readonly failure?: LocalServerFailure;
   // While ready after a degraded resume where local models could not be restored.
   readonly localModelsDegraded?: LocalModelsDegradedStatus;
 }
@@ -485,6 +500,8 @@ export class LocalServerModule implements Module {
   #location: string | undefined;
   #locationError: string | undefined;
   #refusal: WindowsPrivateRefusal | undefined;
+  #failure: LocalServerFailure | undefined;
+  #waiting: LocalServerWaiting | undefined;
   #localModelsDegraded: LocalModelsDegradedStatus | undefined;
   #node: Promise<string> | undefined;
   #abort = new AbortController();
@@ -708,6 +725,9 @@ export class LocalServerModule implements Module {
       step: this.#step,
       progress: this.#progress,
       ...(this.#transfer ? { transfer: this.#transfer } : {}),
+      ...(this.#waiting && this.#phase === "installing"
+        ? { waiting: this.#waiting }
+        : {}),
       attempt: this.#attempt,
       localModels: this.#check,
       location: {
@@ -724,6 +744,7 @@ export class LocalServerModule implements Module {
       ...(this.#byokModels ? { byokModels: this.#byokModels } : {}),
       ...(this.#legacyBackup ? { legacyBackup: this.#legacyBackup } : {}),
       ...(this.#refusal ? { refusal: this.#refusal } : {}),
+      ...(this.#failure ? { failure: this.#failure } : {}),
       ...(this.#localModelsDegraded
         ? { localModelsDegraded: this.#localModelsDegraded }
         : {}),
@@ -1282,7 +1303,7 @@ export class LocalServerModule implements Module {
       const runtime = await this.#timed("installer_runtime", async () =>
         job.runtime && !job.signInRequired
           ? job.runtime
-          : installer.runtime(signal),
+          : this.#runtimeOf(installer, signal),
       );
       const preferredRuntime = setupRuntime(runtime.setupChoice);
       this.#ctx?.config.update({
@@ -1355,6 +1376,7 @@ export class LocalServerModule implements Module {
         "failed",
         message,
         windowsPrivateRefusal((error as { refusal?: unknown } | null)?.refusal),
+        localServerFailure((error as { code?: unknown } | null)?.code),
       );
       throw error;
     } finally {
@@ -1396,7 +1418,7 @@ export class LocalServerModule implements Module {
   ): Promise<LocalRuntime | { readonly byok: SetupByokConfig } | undefined> {
     const runtime =
       setupRuntime(setupChoice) ??
-      setupRuntime((await installer.runtime(signal)).setupChoice) ??
+      setupRuntime((await this.#runtimeOf(installer, signal)).setupChoice) ??
       "pi";
     this.#signInInstaller = installer;
     this.#switchTo = undefined;
@@ -1709,11 +1731,31 @@ export class LocalServerModule implements Module {
     );
   }
 
-  // A refusal stays only with the failure it caused.
+  // The runtime the installation set up. On Windows the installer's lookup
+  // can run for minutes with nothing to report, so after a while the page
+  // says what it waits on.
+  async #runtimeOf(
+    installer: InstallerApi,
+    signal: AbortSignal,
+  ): Promise<InstanceRuntime> {
+    const slow = setTimeout(() => {
+      this.#waiting = "runtime";
+      this.#ctx?.bus.emit("local-server.changed");
+    }, RUNTIME_LOOKUP_HINT_MS);
+    try {
+      return await installer.runtime(signal);
+    } finally {
+      clearTimeout(slow);
+      this.#waiting = undefined;
+    }
+  }
+
+  // A refusal or a failure reason stays only with the failure it caused.
   #set(
     phase: LocalServerPhase,
     message: string,
     refusal?: WindowsPrivateRefusal,
+    failure?: LocalServerFailure,
   ): void {
     // A failure stays on the step it happened in.
     if (phase !== "installing" && phase !== "ready" && phase !== "failed") {
@@ -1725,6 +1767,7 @@ export class LocalServerModule implements Module {
     this.#phase = phase;
     this.#message = message;
     this.#refusal = phase === "failed" ? refusal : undefined;
+    this.#failure = phase === "failed" ? failure : undefined;
     if (phase !== "ready") this.#localModelsDegraded = undefined;
     this.#ctx?.bus.emit("local-server.changed");
   }
@@ -3528,9 +3571,25 @@ export interface Reconnect {
 }
 
 const RECONNECT: Reconnect = { windowMs: 60_000, maxBackoffMs: 5_000 };
-// The runtime lookup runs a 120-second harness probe, with private file and
-// pinned tool checks before and after it.
-const INSTALLER_RUNTIME_TIMEOUT_MS = 180_000;
+// The runtime lookup runs a harness status probe (120 s at most) with
+// private folder and pinned tool checks around it; on Windows each of those
+// is a PowerShell ACL request of up to 30 s, so a slow machine takes a few
+// minutes and the worst case of every inner limit stays near seven. The
+// installer runs one lookup per instance and keeps its answer, so waiting
+// costs nothing and asking again joins it. This limit only ends a lookup
+// that has stopped making progress; it is not a performance budget.
+export const RUNTIME_LOOKUP_LIMIT_MS = 10 * 60_000;
+// When the setup page starts saying what the bar is waiting on.
+export const RUNTIME_LOOKUP_HINT_MS = 15_000;
+
+const FAILURES: ReadonlySet<string> = new Set<LocalServerFailure>([
+  "runtime_lookup_timed_out",
+  "runtime_lookup_unreachable",
+]);
+const localServerFailure = (code: unknown): LocalServerFailure | undefined =>
+  typeof code === "string" && FAILURES.has(code)
+    ? (code as LocalServerFailure)
+    : undefined;
 
 const TRANSIENT_CODES = new Set([
   "ECONNRESET",
@@ -3540,6 +3599,9 @@ const TRANSIENT_CODES = new Set([
   "UND_ERR_SOCKET",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_CLOSED",
+  // fetch stops waiting for response headers after 300 s; the installer may
+  // still be working on the answer.
+  "UND_ERR_HEADERS_TIMEOUT",
 ]);
 
 // The code of a transport failure worth retrying, found on the error or its
@@ -3823,25 +3885,54 @@ export class InstallerApi {
   }
 
   // The runtime the installation set up, with the paths of its executable
-  // and profile.
+  // and profile. The installer answers once its lookup ends, and asking
+  // again joins the running one, so a dropped connection is asked again
+  // like a job poll; only RUNTIME_LOOKUP_LIMIT_MS in all ends the wait.
   async runtime(signal: AbortSignal): Promise<InstanceRuntime> {
-    const deadline = AbortSignal.timeout(INSTALLER_RUNTIME_TIMEOUT_MS);
-    try {
-      return await this.#json(
-        `/api/instances/${LOCAL_INSTANCE}/runtime`,
-        undefined,
-        "GET",
-        AbortSignal.any([signal, deadline]),
-      );
-    } catch (error) {
-      if (!signal.aborted && deadline.aborted)
-        throw new Error(
-          "The installer timed out while reading the selected runtime.",
-          {
-            cause: error,
-          },
+    const deadline = AbortSignal.timeout(RUNTIME_LOOKUP_LIMIT_MS);
+    const either = AbortSignal.any([signal, deadline]);
+    let since: number | undefined;
+    let wait = this.#pollMs;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.#json(
+          `/api/instances/${LOCAL_INSTANCE}/runtime`,
+          undefined,
+          "GET",
+          either,
         );
-      throw error;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (deadline.aborted)
+          throw Object.assign(
+            new Error(
+              "Checking the AI runtime on this computer did not finish in time.",
+              { cause: error },
+            ),
+            { code: "runtime_lookup_timed_out" },
+          );
+        const code = transientCode(error);
+        if (!code) throw error;
+        this.#log?.warn("local_server.installer_unreachable", {
+          stage: "runtime",
+          code,
+          attempt,
+        });
+        // A lookup that outlasted fetch's wait for an answer is still
+        // running in the installer: ask again at once to join it.
+        if (code === "UND_ERR_HEADERS_TIMEOUT") continue;
+        since ??= Date.now();
+        if (Date.now() - since >= this.#reconnect.windowMs)
+          throw Object.assign(
+            new Error(
+              "Lost the connection to the installer while checking the AI runtime.",
+              { cause: error },
+            ),
+            { code: "runtime_lookup_unreachable" },
+          );
+        await delay(wait, undefined, { signal });
+        wait = Math.min(wait * 2, this.#reconnect.maxBackoffMs);
+      }
     }
   }
 
