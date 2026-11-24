@@ -63,6 +63,7 @@ import {
   inspectNativeListeners,
   inspectNativeProcess,
   nativeConfigurationChanged,
+  SERVICE_RESTART_POLICY,
   startNativeProcess,
   stopNativeProcess,
 } from "./native-process.js";
@@ -130,6 +131,12 @@ vi.mock("./native-process.js", () => {
     nativeConfigurationChanged: vi.fn(),
     startNativeProcess: vi.fn(),
     stopNativeProcess: vi.fn(),
+    SERVICE_RESTART_POLICY: {
+      delaysMs: [1_000],
+      windowMs: 60_000,
+      limit: 5,
+      armAfterMs: 10_000,
+    },
   };
 });
 vi.mock("./native-database.js", () => ({ prepareNativeDatabase: vi.fn() }));
@@ -880,6 +887,9 @@ test("only TeamHub's process gets the server identity key", async () => {
   );
   for (const options of others)
     expect(options.env).not.toHaveProperty("TEAMHUB_LOCAL_IDENTITY_KEY");
+  // Each of them is restarted by its supervisor when it exits unasked.
+  for (const options of services)
+    expect(options.restartOnExit).toEqual(SERVICE_RESTART_POLICY);
   const commands = vi.mocked(runProcess).mock.calls;
   expect(commands.some((row) => row[1].includes("migrate"))).toBe(true);
   for (const [, , options] of commands)
