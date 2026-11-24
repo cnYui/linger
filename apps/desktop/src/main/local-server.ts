@@ -37,6 +37,7 @@ import { downloadInRegion } from "@linger/local-installation/region";
 import { latestLegacyBackup } from "@linger/local-installation/legacy-database";
 import { legacyMigrationPending } from "@linger/local-installation/home";
 import { loadInstance } from "@linger/local-installation/instance";
+import { foldersInUse } from "@linger/local-installation/native-process";
 import { normalizeFailurePunctuation } from "@linger/local-installation/localmodels-failure";
 import { validateSourceRepository } from "@linger/local-installation/source-checkout";
 import type { LegacyInstanceSkipped } from "@linger/local-installation/legacy-migration";
@@ -389,6 +390,11 @@ export interface LocalServerOptions {
   // Chromium's proxy for a URL (session.resolveProxy); without it the
   // services get no system proxy.
   readonly resolveProxy?: (url: string) => Promise<string>;
+  // How often the running server the window shows is checked, and how long
+  // one that does not answer gets to come back by itself before a resume;
+  // WATCH_MS and UNREACHABLE_GRACE_MS by default.
+  readonly watchMs?: number;
+  readonly unreachableGraceMs?: number;
 }
 
 // The starter Room the server makes for a new owner, with their Agents.
@@ -399,6 +405,19 @@ const SIGN_IN_POLL_MS = 3_000;
 // How long one check that the installed server still answers as itself
 // serves the pages that ask whether to offer the owner account.
 const SERVER_CHECK_TTL_MS = 2_000;
+const WATCH_MS = 30_000;
+// Longer than a service supervisor's restart delays (1, 2 and 5 seconds)
+// plus a web start, so a restart it has under way is not doubled.
+const UNREACHABLE_GRACE_MS = 20_000;
+// A ready server counts as stopped only after this many unanswered checks in
+// a row, spread over the grace, each waiting longer than a launch's fast
+// check: one under heavy load (such as local model inference) can answer
+// slowly for a while, and resuming it would send the window to Starting.
+const UNREACHABLE_PROBES = 3;
+const UNREACHABLE_PROBE_TIMEOUT_MS = 5_000;
+// A server that keeps going away is resumed at most this often on its own;
+// Retry is never held back.
+const RECOVERY_INTERVAL_MS = 60_000;
 
 // The instance the desktop installs.
 export const LOCAL_INSTANCE = "desktop";
@@ -489,6 +508,10 @@ export class LocalServerModule implements Module {
   #node: Promise<string> | undefined;
   #abort = new AbortController();
   #offRetry: (() => void) | undefined;
+  #offUnreachable: (() => void) | undefined;
+  #watch: ReturnType<typeof setInterval> | undefined;
+  #recovering = false;
+  #recoveredAt: number | undefined;
   #offReset: (() => void) | undefined;
   #offDaemon: (() => void) | undefined;
   #offDaemonConnection: (() => void) | undefined;
@@ -563,6 +586,10 @@ export class LocalServerModule implements Module {
       this.#daemonConnection = undefined;
     });
     this.#offRetry = ctx.bus.on("local-server.retry", () => {
+      if (this.#phase === "ready") {
+        void this.#recoverUnreachable("retry", 0, false);
+        return;
+      }
       if (this.#phase !== "failed") return;
       void this.#readRecord().then((latest) => {
         const target = latest ?? record;
@@ -576,10 +603,21 @@ export class LocalServerModule implements Module {
       record = undefined;
       void this.#reset();
     });
+    const grace = this.#options.unreachableGraceMs ?? UNREACHABLE_GRACE_MS;
+    this.#offUnreachable = ctx.bus.on("local-server.unreachable", () => {
+      void this.#recoverUnreachable("load_failed", grace, true);
+    });
+    this.#watch = setInterval(
+      () => void this.#recoverUnreachable("watch", grace, true),
+      this.#options.watchMs ?? WATCH_MS,
+    );
+    this.#watch.unref?.();
   }
 
   async stop(reason: StopReason): Promise<void> {
     this.#offRetry?.();
+    this.#offUnreachable?.();
+    clearInterval(this.#watch);
     this.#offReset?.();
     this.#offDaemon?.();
     this.#offDaemonConnection?.();
@@ -2204,12 +2242,24 @@ export class LocalServerModule implements Module {
     if (this.#options.checkout) return;
     const parent = path.join(home, "desktop", "source");
     const kept = keep.flatMap((item) => (item ? [path.basename(item)] : []));
-    for (const entry of await readdir(parent).catch(() => [] as string[]))
-      if (!kept.includes(entry))
-        await rm(path.join(parent, entry), {
-          recursive: true,
-          force: true,
-        }).catch(() => undefined);
+    const prunable = (
+      await readdir(parent).catch(() => [] as string[])
+    ).flatMap((entry) =>
+      kept.includes(entry) ? [] : [path.join(parent, entry)],
+    );
+    if (!prunable.length) return;
+    // A service still running from a folder (its restart onto the kept one
+    // has not happened, or failed) would lose its files under it.
+    const inUse = await foldersInUse(prunable);
+    for (const folder of prunable) {
+      if (inUse.has(folder)) {
+        this.#ctx?.log.info("local_server.source_in_use", {
+          source: path.basename(folder),
+        });
+        continue;
+      }
+      await rm(folder, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   // Downloads a verified archive and unpacks its single top-level folder
@@ -2787,9 +2837,59 @@ export class LocalServerModule implements Module {
     ctx.bus.emit("setup.open");
   }
 
+  // The services can stop while the window shows them. Their supervisors
+  // restart them, so one that does not answer first gets `graceMs` to come
+  // back, checked again during it; one still silent after that (its
+  // supervisor gave up or was ended too) is resumed like a launch: the
+  // installer starts what is not running.
+  async #recoverUnreachable(
+    trigger: "retry" | "load_failed" | "watch",
+    graceMs: number,
+    throttled: boolean,
+  ): Promise<void> {
+    if (this.#recovering || this.#resuming || this.#phase !== "ready") return;
+    if (
+      throttled &&
+      this.#recoveredAt !== undefined &&
+      Date.now() - this.#recoveredAt < RECOVERY_INTERVAL_MS
+    )
+      return;
+    this.#recovering = true;
+    try {
+      let record = await this.#windowRecord();
+      if (!record || (await this.#stillAnswers(record.origin))) return;
+      const checks = graceMs > 0 ? UNREACHABLE_PROBES - 1 : 0;
+      for (let check = 0; check < checks; check++) {
+        await delay(graceMs / checks, undefined, {
+          signal: this.#abort.signal,
+        });
+        if (this.#resuming) return;
+        record = await this.#windowRecord();
+        if (!record || (await this.#stillAnswers(record.origin))) return;
+      }
+      this.#recoveredAt = Date.now();
+      this.#ctx?.log.warn("local_server.unreachable_resume", { trigger });
+      await this.#resume(record, this.#abort.signal);
+    } catch {
+      // Aborted by stop.
+    } finally {
+      this.#recovering = false;
+    }
+  }
+
   // Whether the services already answer, such as after only the app quit.
   #reachable(origin: string): Promise<boolean> {
     return answers(this.#options.fetch ?? fetch, origin);
+  }
+
+  // Whether a ready server still answers, given more time than a launch's
+  // fast check.
+  #stillAnswers(origin: string): Promise<boolean> {
+    return answers(
+      this.#options.fetch ?? fetch,
+      origin,
+      UNREACHABLE_PROBE_TIMEOUT_MS,
+    );
   }
 
   // Whether the services run another source package than this app brings,
@@ -3390,12 +3490,13 @@ const STAGES: Record<string, readonly [LocalServerStep, number, number]> = {
 async function answers(
   fetcher: typeof fetch,
   origin: string,
+  timeoutMs = 1_000,
 ): Promise<boolean> {
   try {
     await fetcher(origin, {
       method: "HEAD",
       redirect: "manual",
-      signal: AbortSignal.timeout(1_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return true;
   } catch {

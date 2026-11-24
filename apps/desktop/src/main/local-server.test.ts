@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -3501,6 +3501,33 @@ describe("LocalServerModule after a restart", () => {
     });
     expect(readdirSync(sources)).toEqual([path.basename(current)]);
     await f.host.stop("quit");
+  });
+
+  it("keeps an older source folder a running process still starts from", async () => {
+    const root = tempDirectory();
+    const archive = sourceArchive(root);
+    const f = installedBy(archive);
+    const sources = path.join(f.home, "desktop", "source");
+    const previous = path.join(sources, "previous");
+    // A service the move did not reach still runs from the older folder.
+    const service = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", path.join(previous, "server.mjs")],
+      { stdio: "ignore" },
+    );
+    try {
+      await new Promise((resolve) => service.once("spawn", resolve));
+      await f.host.start();
+      await waitForInstaller(() =>
+        expect(f.module.status().phase).toBe("ready"),
+      );
+      expect(readdirSync(sources).sort()).toEqual(
+        [archive.sha256.slice(0, 16), "previous"].sort(),
+      );
+      await f.host.stop("quit");
+    } finally {
+      service.kill("SIGKILL");
+    }
   });
 
   it("shows the start failure when moving to the newer source package fails", async () => {

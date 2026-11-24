@@ -31,6 +31,7 @@ import { test as base, vi, type TestContext } from "vitest";
 import {
   NATIVE_PROCESS_IDENTITY_UNVERIFIED,
   NATIVE_PROCESS_REPLACED,
+  foldersInUse,
   nativeConfigurationChanged,
   startNativeProcess,
   inspectNativeProcess,
@@ -900,3 +901,21 @@ test.for([
     );
   },
 );
+posix("names the folders a running process starts from", async (context) => {
+  const { expect } = context;
+  const root = await fixture(context);
+  const used = path.join(root, "used");
+  const unused = path.join(root, "unused");
+  const child = spawn(
+    process.execPath,
+    ["-e", "setInterval(()=>{},1000)", path.join(used, "server.mjs")],
+    { stdio: "ignore" },
+  );
+  context.onTestFinished(() => {
+    child.kill("SIGKILL");
+  });
+  await new Promise((resolve) => child.once("spawn", resolve));
+  expect(await foldersInUse([used, unused, `${used}-other`])).toEqual(
+    new Set([used]),
+  );
+});

@@ -31,6 +31,8 @@ export interface BusEvents {
   // Forget the installation the window used and set this computer up again.
   "local-server.reset": [];
   "local-server.retry": [];
+  // The window could not load the server it shows.
+  "local-server.unreachable": [];
   "power.changed": [];
   "runtime.activity": [running: number];
   "runtime.state": [state: string];

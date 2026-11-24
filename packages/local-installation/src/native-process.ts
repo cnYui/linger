@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -883,6 +883,34 @@ export async function reclaimNativeOrphans(
   }
 }
 
+/**
+ * The ones of `folders` that a running process of this user starts from: its
+ * command line names a path inside one. When processes cannot be listed,
+ * every folder counts as in use, so nothing a service needs is removed.
+ */
+export async function foldersInUse(
+  folders: readonly string[],
+): Promise<Set<string>> {
+  let commands: string[];
+  try {
+    commands =
+      process.platform === "win32"
+        ? (await windowsProcesses()).map((entry) => entry.command)
+        : (await ownCommands()).map((entry) => entry.command);
+  } catch {
+    return new Set(folders);
+  }
+  const used = await Promise.all(
+    folders.map(async (folder) => {
+      // A service may run from the resolved path of a linked folder.
+      const names = [folder, await realpath(folder).catch(() => folder)];
+      return commands.some((command) =>
+        names.some((name) => command.includes(name + path.sep)),
+      );
+    }),
+  );
+  return new Set(folders.filter((_, index) => used[index]));
+}
 /** Each process of this user with its command line (macOS and Linux). */
 async function ownCommands(): Promise<Array<{ pid: number; command: string }>> {
   if (process.platform === "linux") {
