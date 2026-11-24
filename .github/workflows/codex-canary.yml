@@ -1,11 +1,12 @@
-name: Codex canary
+name: Runtime canary
 
-# Runs the Computer Daemon's native Codex compatibility tests against npm's
-# newest stable Codex (or the version given to a manual run). The Daemon sets
-# only a minimum Codex version, so a user's own newer Codex reaches it before
-# any lock does; a protocol change shows up here first. The localmodels kit's
+# Runs the Computer Daemon's native compatibility tests against the newest
+# stable Codex (npm) and Claude Code (Anthropic's stable channel), or the
+# versions given to a manual run. The Daemon sets only a minimum version per
+# Runtime, so a user's own newer CLI reaches it before any localmodels kit
+# locks that release; a protocol change shows up here first. The kit's
 # scheduled Codex lock update MR waits for this canary on its version. A failed
-# scheduled run opens one issue, and later failures comment on it.
+# scheduled run opens one issue per Runtime, and later failures comment on it.
 on:
   schedule:
     - cron: "0 1 * * *"
@@ -13,6 +14,9 @@ on:
     inputs:
       version:
         description: Codex version to test (default npm's latest stable)
+        required: false
+      claude_version:
+        description: Claude Code version to test (default the stable channel)
         required: false
   pull_request:
     paths:
@@ -22,14 +26,14 @@ permissions:
   contents: read
   issues: write
 
-# One group per tested version, so a manual run for one Codex never cancels
-# the run for another, or the daily run.
+# One group per tested pair of versions, so a manual run for one version never
+# cancels the run for another, or the daily run.
 concurrency:
-  group: codex-canary-${{ github.ref }}-${{ inputs.version || 'latest' }}
+  group: runtime-canary-${{ github.ref }}-${{ inputs.version || 'latest' }}-${{ inputs.claude_version || 'stable' }}
   cancel-in-progress: true
 
 jobs:
-  canary:
+  codex:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -71,6 +75,56 @@ jobs:
           set -euo pipefail
           title="Codex canary fails"
           body="The Daemon's native Codex compatibility tests failed on Codex ${VERSION:-unknown}: $RUN"
+          issue=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      # The native linux-x64 build from Anthropic's release channel, checked
+      # against its manifest, as the localmodels kit installs it.
+      - name: Install Claude Code
+        id: claude
+        env:
+          REQUESTED: ${{ inputs.claude_version }}
+          BASE: https://downloads.claude.ai/claude-code-releases
+        run: |
+          set -euo pipefail
+          version=${REQUESTED:-$(curl -fsSL "$BASE/stable")}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a stable Claude Code version: $version"; exit 1; }
+          dir="$RUNNER_TEMP/claude"
+          mkdir -p "$dir"
+          checksum=$(curl -fsSL "$BASE/$version/manifest.json" | jq -er '.platforms["linux-x64"].checksum')
+          curl -fsSL -o "$dir/claude" "$BASE/$version/linux-x64/claude"
+          echo "$checksum  $dir/claude" | sha256sum -c -
+          chmod +x "$dir/claude"
+          "$dir/claude" --version
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "executable=$dir/claude" >>"$GITHUB_OUTPUT"
+      # The stream-json handshake and the local authentication probe, against
+      # a loopback endpoint that must see no model request.
+      - name: Protocol and authentication probe
+        working-directory: apps/computer/local-daemon
+        env:
+          LINGER_CLAUDE_COMPAT_EXECUTABLE: ${{ steps.claude.outputs.executable }}
+        run: go test ./internal/provider -run '^TestNativeClaudeAuthenticationDoesNotCallModel$' -count=1 -v
+      - name: Report a scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.claude.outputs.version }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Claude Code canary fails"
+          body="The Daemon's native Claude Code compatibility tests failed on Claude Code ${VERSION:-unknown}: $RUN"
           issue=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
           if [ -n "$issue" ]; then
             gh issue comment "$issue" --body "$body"

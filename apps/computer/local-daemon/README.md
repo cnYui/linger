@@ -54,9 +54,10 @@ distributions record both from the kit's release (`runtimeVersions`,
 `runtimeBaselines`), and a Go test fails when either is below a minimum. Raise a minimum only
 after a kit that installs a release at or above it ships in the desktop
 distribution pins (`apps/desktop/distribution/*.json`).
-The Codex canary workflow (`.github/workflows/codex-canary.yml`) runs the native
-Codex compatibility tests daily against npm's newest stable Codex, because a
-user's own newer Codex reaches the Daemon before any kit locks it. The
+The runtime canary workflow (`.github/workflows/codex-canary.yml`) runs the
+native compatibility tests daily against npm's newest stable Codex and the
+newest Claude Code on Anthropic's stable channel, because a user's own newer
+CLI reaches the Daemon before any kit locks it. The
 localmodels kit opens a lock update merge request for each new stable Codex at
 least seven days old; it should merge only after the canary passes on that
 version.
